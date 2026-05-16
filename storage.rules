@@ -1,0 +1,57 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function isImageFile() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function isFileSizeOk() {
+      return request.resource.size < 5 * 1024 * 1024;
+    }
+
+    // ─── User avatars ──────────────────────────────────────────────────────────
+    match /avatars/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+        && uid() == userId
+        && isImageFile()
+        && isFileSizeOk();
+      allow delete: if isSignedIn() && uid() == userId;
+    }
+
+    // ─── Event images ──────────────────────────────────────────────────────────
+    match /events/{eventId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isImageFile() && isFileSizeOk();
+      allow delete: if isSignedIn();
+    }
+
+    // ─── Contribution receipts ─────────────────────────────────────────────────
+    match /receipts/{contribId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isFileSizeOk();
+      allow delete: if isSignedIn();
+    }
+
+    // ─── Announcement attachments ──────────────────────────────────────────────
+    match /announcements/{announcementId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isFileSizeOk();
+      allow delete: if isSignedIn();
+    }
+
+    // ─── Default deny ──────────────────────────────────────────────────────────
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

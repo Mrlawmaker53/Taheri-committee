@@ -1,0 +1,270 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helper functions ──────────────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function userData() {
+      return get(/databases/$(database)/documents/users/$(uid())).data;
+    }
+
+    function role() {
+      return userData().role;
+    }
+
+    function isMember() {
+      return isSignedIn() && role() == 'member';
+    }
+
+    function isSupervisor() {
+      return isSignedIn() && role() == 'supervisor';
+    }
+
+    function isLeader() {
+      return isSignedIn() && (role() == 'leader' || role() == 'admin');
+    }
+
+    function isSupervisorOrLeader() {
+      return isSignedIn() && (role() == 'supervisor' || role() == 'leader' || role() == 'admin');
+    }
+
+    function isActive() {
+      return userData().isActive == true;
+    }
+
+    function isOwner(docUid) {
+      return isSignedIn() && uid() == docUid;
+    }
+
+    function inSameTeam(teamId) {
+      return isSignedIn() && userData().teamId == teamId;
+    }
+
+    // ─── users ─────────────────────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read: if isSignedIn() && isActive();
+      allow create: if isLeader();
+      allow update: if isOwner(userId) || isLeader();
+      allow delete: if isLeader();
+    }
+
+    // ─── teams ─────────────────────────────────────────────────────────────────
+    match /teams/{teamId} {
+      allow read: if isSignedIn() && isActive();
+      allow create, update, delete: if isLeader();
+    }
+
+    // ─── events ────────────────────────────────────────────────────────────────
+    match /events/{eventId} {
+      allow read: if isSignedIn() && isActive();
+      allow create, update: if isSupervisorOrLeader();
+      allow delete: if isLeader();
+    }
+
+    // ─── rsvp ──────────────────────────────────────────────────────────────────
+    match /rsvp/{rsvpId} {
+      allow read: if isSignedIn() && isActive();
+      allow create: if isSignedIn() && isActive()
+        && request.resource.data.userId == uid();
+      allow update: if isSignedIn() && isActive()
+        && resource.data.userId == uid();
+      allow delete: if isLeader();
+    }
+
+    // ─── attendance ────────────────────────────────────────────────────────────
+    // NOTE: Compound uniqueness (eventId + userId) is NOT enforced here —
+    // Firestore has no native unique constraint. The app queries before
+    // every write to prevent duplicates. These rules only validate method.
+    match /attendance/{attendId} {
+      // Member can read own records; Supervisor/Leader can read all.
+      allow read: if isSignedIn() && isActive() && (
+        resource.data.userId == uid() ||
+        isSupervisorOrLeader()
+      );
+
+      // Self-scan: userId must equal own uid AND method must be 'qr'.
+      // Manual: only Supervisor/Leader, method must be 'manual'.
+      allow create: if isSignedIn() && isActive() && (
+        (request.resource.data.userId == uid() &&
+         request.resource.data.method == 'qr') ||
+        (isSupervisorOrLeader() &&
+         request.resource.data.method == 'manual')
+      );
+
+      // Attendance is immutable once written.
+      allow update, delete: if false;
+    }
+
+    // ─── contributions ─────────────────────────────────────────────────────────
+    match /contributions/{contribId} {
+      allow get: if isSignedIn() && isActive()
+        && (resource.data.memberId == uid()
+          || resource.data.supervisorId == uid()
+          || isLeader());
+      allow list: if isSignedIn() && isActive();
+      allow create: if isSignedIn() && isActive()
+        && (request.resource.data.memberId == uid() || isSupervisorOrLeader());
+      allow update: if isSignedIn() && isActive()
+        && (resource.data.supervisorId == uid() || isLeader());
+      allow delete: if isLeader();
+    }
+
+    // ─── group_requests ────────────────────────────────────────────────────────
+    match /group_requests/{reqId} {
+      allow read: if isSupervisorOrLeader();
+      allow create: if isSupervisor()
+        && request.resource.data.supervisorId == uid();
+      allow update: if isLeader();
+      allow delete: if isLeader();
+    }
+
+    // ─── transfer_requests ─────────────────────────────────────────────────────
+    match /transfer_requests/{reqId} {
+      allow get: if isSignedIn() && isActive()
+        && (resource.data.memberId == uid() || isSupervisorOrLeader());
+      allow list: if isSignedIn() && isActive();
+      allow create: if isSignedIn() && isActive()
+        && request.resource.data.memberId == uid();
+      allow update: if isSupervisorOrLeader();
+      allow delete: if isLeader();
+    }
+
+    // ─── transport ─────────────────────────────────────────────────────────────
+    match /transport/{transportId} {
+      allow read: if isSignedIn() && isActive();
+      allow create, update: if isSupervisorOrLeader();
+      allow delete: if isLeader();
+    }
+
+    // ─── pickups ────────────────────────────────────────────────────────────────
+    match /pickups/{pickupId} {
+      allow read: if isSignedIn() && isActive();
+      allow create: if isSignedIn() && isActive() && isSupervisorOrLeader();
+      allow update: if isSignedIn() && isActive() && isSupervisorOrLeader();
+      allow delete: if isSignedIn() && isActive() && isLeader();
+    }
+
+    // ─── notifications ─────────────────────────────────────────────────────────
+    // Per-user notification copies are written by Cloud Functions; clients
+    // only read their own and may flip `isRead`. responseCount is also
+    // updated server-side on response create.
+    match /notifications/{notifId} {
+      allow get: if isSignedIn() && isActive()
+        && resource.data.userId == uid();
+      allow list: if isSignedIn() && isActive();
+      allow create: if isSignedIn() && isActive() && (
+        request.resource.data.userId == uid() || isSupervisorOrLeader()
+      );
+      allow update: if isSignedIn() && isActive()
+        && request.auth.uid == resource.data.userId
+        && (request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['isRead', 'responseCount']));
+        && resource.data.userId == uid();
+      allow delete: if isSignedIn() && isActive()
+        && resource.data.userId == uid();
+    }
+
+    // ─── fcm_tokens ────────────────────────────────────────────────────────────
+    // Each user manages their own device tokens. Read scoped to owner.
+    match /fcm_tokens/{tokenId} {
+      allow read: if isSignedIn() && resource.data.userId == uid();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == uid();
+      allow update, delete: if isSignedIn()
+        && resource.data.userId == uid();
+    }
+
+    // ─── notification_responses ────────────────────────────────────────────────
+    // Members write their own response to actionable notifications.
+    // Supervisors/Leaders read aggregated responses for reporting.
+    match /notification_responses/{responseId} {
+      allow read: if isSignedIn() && isActive() && (
+        resource.data.userId == uid() || isSupervisorOrLeader()
+      );
+      allow create: if isSignedIn() && isActive()
+        && request.resource.data.userId == uid();
+      // Responses are immutable once recorded.
+      allow update, delete: if false;
+    }
+
+    // ─── activity_logs ─────────────────────────────────────────────────────────
+    match /activity_logs/{logId} {
+      allow read: if isLeader();
+      allow create: if isSignedIn() && isActive();
+      allow update, delete: if false;
+    }
+
+    // ─── announcements ─────────────────────────────────────────────────────────
+    match /announcements/{announcementId} {
+      allow read: if isSignedIn() && isActive();
+      allow create, update: if isSupervisorOrLeader();
+      allow delete: if isLeader();
+    }
+
+    // ─── vehicles (NEW — top-level collection) ─────────────────────────────────
+    match /vehicles/{vehicleId} {
+      allow read: if isSignedIn() && isActive();
+      allow create, update: if isSupervisorOrLeader();
+      allow delete: if isSupervisorOrLeader();
+    }
+
+    // ─── seatBookings (NEW — top-level collection) ────────────────────────────
+    match /seatBookings/{bookingId} {
+      allow read: if isSignedIn() && isActive();
+
+      // Members can only book for themselves
+      allow create: if isSignedIn() && isActive()
+        && request.resource.data.userId == uid();
+
+      // User can cancel own; admin can update any
+      allow update: if isSignedIn() && isActive()
+        && (resource.data.userId == uid() || isSupervisorOrLeader());
+
+      allow delete: if isLeader();
+    }
+
+    // ─── bookings subcollection (legacy) ──────────────────────────────────────
+    match /bookings/{seatId} {
+      // Anyone authenticated can read (see who booked which seat)
+      allow read: if request.auth != null;
+
+      // Book: only your own data, and you must not already have a booking
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid
+        && !userAlreadyBooked(transportId);
+
+      // Release: only the booker themselves, or supervisor/leader
+      allow delete: if request.auth.uid == resource.data.userId
+        || isSupervisorOrLeader();
+
+      // No updates — delete + re-create only
+      allow update: if false;
+    }
+
+    // ─── waitingList subcollection ─────────────────────────────────────
+    match /waitingList/{userId} {
+      // Anyone authenticated can read waiting list
+      allow read: if request.auth != null;
+
+      // Join waiting list: only your own data
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.transportId == transportId;
+
+      // Leave waiting list: only yourself or supervisor/leader
+      allow delete: if request.auth.uid == resource.data.userId
+        || isSupervisorOrLeader();
+
+      // Update status (for notifications): only supervisor/leader
+      allow update: if isSupervisorOrLeader()
+        && request.resource.data.keys().hasAll(['status']);
+    }
+  }
+}
